@@ -1,0 +1,132 @@
+import pandas as pd
+from openpyxl import Workbook
+from openpyxl.utils.dataframe import dataframe_to_rows
+from openpyxl.styles import PatternFill, Border, Side, Font
+
+df_a = pd.read_csv('サンプル.csv')
+
+df_b = pd.read_excel('データベースサンプル.xlsx', sheet_name='職員名簿')
+
+df_c = pd.read_excel('データベースサンプル.xlsx', sheet_name='登録者')
+
+# 「役職」取得関数
+def get_position(employee_number):
+    position = df_b.loc[df_b['職員番号'] == employee_number, '役職'].values[0]
+    return position if position else 'その他'
+
+# 「登録者」取得関数
+def get_registrant(employee_number, date):
+    # 登録日を取得します。
+    registration_date = df_c.loc[df_c['職員番号'] == employee_number, '登録日'].values
+    if registration_date.size > 0:
+        # 日付が登録日より前の場合、Trueを返します。
+        return pd.to_datetime(date) <= pd.to_datetime(registration_date[0])
+    # 該当する職員番号がない場合、Falseを返します。
+    return False
+
+# 繰り返し処理開始
+for index, row in df_a.iterrows():
+    position = get_position(row['職員番号'])
+    if position == '会計士':
+        if get_registrant(row['職員番号'], row['日付']):
+            df_a.at[index, '役職'] = 'その他'
+        else:
+            df_a.at[index, '役職'] = '会計士'
+    else:
+        df_a.at[index, '役職'] = position
+
+# 「役職」列が空白の行を削除する
+df_a = df_a.dropna(subset=['役職'])
+
+# 「人数」列を追加します。
+df_a['人数'] = 0
+
+# 繰り返し処理開始
+for index, row in df_a.iterrows():
+    # 「役職」が「その他」ではない場合
+    if row['役職'] != 'その他':
+        df_a.at[index, '人数'] = 1
+    # 「役職」が「その他」の場合
+    else:
+        # 同じ「職員番号」で「役職」が「会計士」でもある場合
+        if '会計士' in df_a[df_a['職員番号'] == row['職員番号']]['役職'].values:
+            df_a.at[index, '人数'] = 0
+        # 上記以外
+        else:
+            df_a.at[index, '人数'] = 1
+
+# 「日付」単位、「作業内容」、「役職」でグループ化し、「作業時間」を合計する
+grouped_data = df_a.groupby(['作業内容', '役職','氏名','人数'])['作業時間'].sum().reset_index()
+
+# タスク毎に「作業時間」と「人数」の合計行を追加する関数
+def add_summary_rows(df):
+    # タスク毎に集計
+    summary = df.groupby('作業内容').agg({'作業時間': 'sum', '人数': 'sum'}).reset_index()
+    summary['役職'] = '合計'
+    summary['氏名'] = ''
+    # 元のデータフレームと結合
+    return pd.concat([df, summary], ignore_index=True)
+
+# 「役職」の順序を定義
+position_order = ['パートナー', '主査', '会計士', 'その他', '審査員', '合計']
+
+# タスク毎に「役職」を指定された順序で並べる関数
+def sort_positions(df, position_order):
+    # 役職の順序をカテゴリタイプとして設定
+    df['役職'] = pd.Categorical(df['役職'], categories=position_order, ordered=True)
+    # タスク毎に「役職」でソート
+    return df.sort_values(['作業内容', '役職'])
+
+# タスク別および役職毎に小計行を追加する関数
+def add_subtotal_rows(df):
+    # タスクと役職毎に集計
+    subtotals = df.groupby(['作業内容', '役職']).agg({'作業時間': 'sum', '人数': 'sum'}).reset_index()
+    subtotals['氏名'] = '小計'
+    # 「合計」行を除外
+    subtotals = subtotals[subtotals['役職'] != '合計']
+    # 元のデータフレームと結合
+    return pd.concat([df, subtotals], ignore_index=True)
+
+# 集計行と小計行を追加し、役職でソート
+grouped_data = add_summary_rows(grouped_data)
+grouped_data = add_subtotal_rows(grouped_data)
+grouped_data = sort_positions(grouped_data, position_order)
+
+# 結果を表示します。
+print(grouped_data)
+
+# 色を定義
+light_blue_fill = PatternFill(start_color='E0EFFF', end_color='E0EFFF', fill_type='solid')
+darker_blue_fill = PatternFill(start_color='CCDDFF', end_color='CCDDFF', fill_type='solid')
+# 罫線とフォントのスタイルを定義
+thin_border = Border(left=Side(style='thin'), 
+                     right=Side(style='thin'), 
+                     top=Side(style='thin'), 
+                     bottom=Side(style='thin'))
+bold_font = Font(bold=True)
+
+# Excelファイルの作成
+wb = Workbook()
+ws = wb.active
+
+# データフレームからリストを取得してExcelファイルに追加
+for r_idx, r in enumerate(dataframe_to_rows(grouped_data, index=False, header=True), 1):
+    ws.append(r)
+    for cell in ws[r_idx]:
+        # 全てのセルに罫線を適用
+        cell.border = thin_border
+    if r_idx == 1:
+        # ヘッダー行のセルに太字フォントを適用
+        for cell in ws[r_idx]:
+            cell.font = bold_font
+    if r[2] == '小計':
+        # '小計'行に薄い青色を適用
+        for cell in ws[r_idx]:
+            cell.fill = light_blue_fill
+    elif r[1] == '合計':
+        # '合計'行に少し薄い青色を適用
+        for cell in ws[r_idx]:
+            cell.fill = darker_blue_fill
+
+# Excelファイル「test1」に保存する
+wb.save('集計結果.xlsx')
